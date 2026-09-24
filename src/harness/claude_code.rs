@@ -223,8 +223,11 @@ pub(crate) fn records_to_messages(records: &[Record], fallback_ts: DateTime<Utc>
 /// the `sessionId` stamped on every line (a fresh UUID when empty). Shared
 /// with harnesses that embed Claude Code's JSONL (Cowork).
 pub(crate) fn messages_to_records(meta: &Meta, messages: &[Message]) -> Vec<Record> {
+    // Lower first: artifact calls arrive with their results, so the dangling
+    // pass below must not close them a second time.
     let lowered = lower_artifact_messages(messages);
-    let messages = lowered.as_slice();
+    let messages = close_dangling_calls(lowered);
+    let messages = messages.as_slice();
     let session_id = if meta.id.is_empty() {
         Uuid::new_v4().to_string()
     } else {
@@ -319,6 +322,72 @@ pub(crate) fn messages_to_records(meta: &Meta, messages: &[Message]) -> Vec<Reco
     }
 
     records
+}
+
+/// Close calls the transcript never answers with one aborted error result
+/// each, or the Anthropic API rejects the resume (HTTP 400), e.g. after
+/// Ctrl+C mid-tool. Slash commands are excluded — their output rides
+/// `local_command` lines, where a stray `tool_result` is itself rejected.
+/// A result recorded before its call (Codex web-search order) already
+/// answers it, so it holds as credit instead of drawing a duplicate.
+fn close_dangling_calls(mut messages: Vec<Message>) -> Vec<Message> {
+    // Ids still open, in first-opened order, with per-id counts: a second
+    // call reuses the entry, and each result closes one opening.
+    let mut open: Vec<&str> = Vec::new();
+    let mut awaiting: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut credit: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for msg in &messages {
+        for block in &msg.content {
+            match block {
+                Block::ToolUse { id, tool } if !matches!(tool, Tool::Command { .. }) => {
+                    let id = id.as_str();
+                    if let Some(n) = credit.get_mut(id).filter(|n| **n > 0) {
+                        *n -= 1;
+                    } else {
+                        if awaiting.get(id).is_none_or(|&n| n == 0) {
+                            open.push(id);
+                        }
+                        *awaiting.entry(id).or_insert(0) += 1;
+                    }
+                }
+                Block::ToolResult { tool_use_id, .. } => {
+                    let id = tool_use_id.as_str();
+                    if let Some(n) = awaiting.get_mut(id).filter(|n| **n > 0) {
+                        *n -= 1;
+                        if *n == 0 {
+                            open.retain(|o| *o != id);
+                        }
+                    } else {
+                        *credit.entry(id).or_insert(0) += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if open.is_empty() {
+        return messages;
+    }
+    // Non-empty `open` implies at least one message exists.
+    let Some(timestamp) = messages.last().map(|msg| msg.timestamp) else {
+        return messages;
+    };
+    messages.push(Message {
+        role: Role::User,
+        content: open
+            .into_iter()
+            .map(|id| Block::ToolResult {
+                tool_use_id: id.to_string(),
+                content: ToolOutput::Text("Tool execution was interrupted or cancelled.".into()),
+                is_error: true,
+            })
+            .collect(),
+        timestamp,
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    messages
 }
 
 /// Claude Code's native artifact is a normal `Artifact` tool call followed

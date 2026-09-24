@@ -111,6 +111,10 @@ A synthetic assistant line (real files add more envelope keys — `isSidechain`,
   `{"input": <original value>}`. Existing objects keep their shape. Reading that
   export into Common retains the wrapper; native load/save keeps the original
   records untouched.
+- **Dangling tool calls.** A history whose `tool_use` has no `tool_result`
+  (Ctrl+C mid-tool) fails a `claude --resume` load with HTTP 400, so export
+  appends one aborted error result per unanswered call as a final user turn.
+  Slash-command calls are excluded; their output rides `local_command` lines.
 - **Resume anchoring.** A leading `summary` line's `leafUuid` must name a real
   user/assistant line in the file, or Claude Code reports the whole session missing;
   txcript anchors generated summaries to the last real turn.
