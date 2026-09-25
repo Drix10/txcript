@@ -724,6 +724,13 @@ fn from_common_closes_every_dangling_call_in_one_turn() {
             && results.contains(&("open-2".to_string(), true)),
         "both open calls must close as errors, got {results:?}"
     );
+    // Same input, identical output: insert order must not depend on hash
+    // iteration order.
+    let again = claude_code::ClaudeCode::from_common(&common).unwrap();
+    assert_eq!(
+        serde_json::to_value(native.body).unwrap(),
+        serde_json::to_value(again.body).unwrap()
+    );
 }
 
 /// A result recorded before its call (Codex web-search order) already
@@ -763,6 +770,74 @@ fn from_common_keeps_result_before_call_without_duplicate() {
         results.iter().filter(|(id, _)| id == "early").count(),
         1,
         "the early result answers the call, got {results:?}"
+    );
+}
+
+/// An interruption followed by more conversation: the synthetic result is
+/// inserted directly after the call, where the API requires it — not at
+/// the end.
+#[test]
+fn from_common_inserts_aborted_result_immediately_after_the_call() {
+    let bash = || common::Tool::Bash {
+        command: "sleep 60".into(),
+        workdir: None,
+        timeout_ms: None,
+        description: None,
+        run_in_background: false,
+    };
+    let mut common = sample_common();
+    common.body.push(common::Message {
+        role: common::Role::Assistant,
+        content: vec![common::Block::ToolUse {
+            id: "mid".into(),
+            tool: bash(),
+        }],
+        timestamp: ts("2026-01-02T03:04:09.000Z"),
+        model: None,
+        stop_reason: Some(common::StopReason::Aborted),
+        usage: None,
+    });
+    common.body.push(common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::Text {
+            text: "never mind".into(),
+        }],
+        timestamp: ts("2026-01-02T03:04:10.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    let native = claude_code::ClaudeCode::from_common(&common).unwrap();
+    let body = serde_json::to_value(native.body).unwrap();
+    let records = body.as_array().unwrap();
+    let at = records
+        .iter()
+        .position(|r| {
+            r.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks.iter().any(|b| {
+                        b.get("type").and_then(Value::as_str) == Some("tool_use")
+                            && b.get("id").and_then(Value::as_str) == Some("mid")
+                    })
+                })
+        })
+        .unwrap();
+    let next = &records[at + 1];
+    let first = next
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.first());
+    assert!(
+        next.get("type").and_then(Value::as_str) == Some("user")
+            && first.and_then(|b| b.get("type").and_then(Value::as_str)) == Some("tool_result")
+            && first.and_then(|b| b.get("tool_use_id").and_then(Value::as_str)) == Some("mid")
+            && first
+                .and_then(|b| b.get("is_error").and_then(Value::as_bool))
+                .unwrap_or(false),
+        "the call must be followed at once by its error result, got {next}"
     );
 }
 
