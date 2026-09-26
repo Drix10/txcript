@@ -136,6 +136,18 @@ mod tests {
         assert!(super::under_dir(gone.to_str().unwrap(), dir.path()));
     }
 
+    // Platform-neutral shape of the same rule: a vanished child matches,
+    // a sibling sharing the string prefix does not.
+    #[test]
+    fn under_dir_matches_vanished_child_but_not_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("packages").join("foo");
+        assert!(super::under_dir(gone.to_str().unwrap(), dir.path()));
+        let packages = dir.path().join("packages");
+        let sibling = dir.path().join("packages-foo");
+        assert!(!super::under_dir(sibling.to_str().unwrap(), &packages));
+    }
+
     #[cfg(windows)]
     #[test]
     fn under_dir_handles_verbatim_prefixes_and_casing() {
